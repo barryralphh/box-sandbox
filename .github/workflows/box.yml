@@ -16,15 +16,8 @@ jobs:
       - name: Install easi.run
         run: |
           curl -fsSLO https://easi.run/install.sh
-          bash install.sh 2>&1 | tee install.log | tail -n 60
-      - name: Wait for admin
-        run: |
-          for i in $(seq 1 40); do
-            code=$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:9443/ || true)
-            echo "admin http $code"
-            [ "$code" = "200" ] && break
-            sleep 3
-          done
+          bash install.sh > install.log 2>&1 || { tail -n 40 install.log; exit 1; }
+          tail -n 15 install.log
       - name: Open private tunnel
         run: |
           curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -39,13 +32,27 @@ jobs:
           [ -n "$URL" ] || { echo "no tunnel url"; tail -n 20 cf.log; exit 1; }
           echo "::add-mask::$URL"
           echo "$URL" > /tmp/live_url
-          code=$(curl -sk -o /dev/null -w '%{http_code}' "$URL/" || true)
-          echo "tunnel http $code"
+      - name: Point the admin at the tunnel address
+        run: |
+          URL=$(cat /tmp/live_url)
+          echo "::add-mask::$URL"
+          cd ~/easi.run
+          touch .env
+          if grep -q '^ADMIN_ORIGIN=' .env; then sed -i "s|^ADMIN_ORIGIN=.*|ADMIN_ORIGIN=$URL|" .env; else echo "ADMIN_ORIGIN=$URL" >> .env; fi
+          grep -q '^ADMIN_MAX_SESSIONS=' .env || echo "ADMIN_MAX_SESSIONS=3" >> .env
+          docker compose up -d --no-build --pull never --no-deps admin 2>&1 | tail -n 5
+          for i in $(seq 1 40); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' "$URL/" || true)
+            echo "tunnel http $code"
+            [ "$code" = "200" ] && break
+            sleep 3
+          done
+          [ "$code" = "200" ] || { docker compose logs --no-color --tail 20 admin; exit 1; }
           curl -s -H "Title: Box live link" -d "$URL" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
           echo "link sent"
       - name: Keep alive
         run: |
-          end=$((SECONDS + 20400))
+          end=$((SECONDS + 20000))
           while [ $SECONDS -lt $end ]; do
             sleep 60
             docker ps --format '{{.Names}}' | wc -l | sed 's/^/containers: /'
