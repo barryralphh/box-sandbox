@@ -1,0 +1,52 @@
+name: box
+on:
+  workflow_dispatch:
+concurrency:
+  group: box
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  box:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    env:
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - name: Install easi.run
+        run: |
+          curl -fsSLO https://easi.run/install.sh
+          bash install.sh 2>&1 | tee install.log | tail -n 60
+      - name: Wait for admin
+        run: |
+          for i in $(seq 1 40); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:9443/ || true)
+            echo "admin http $code"
+            [ "$code" = "200" ] && break
+            sleep 3
+          done
+      - name: Open private tunnel
+        run: |
+          curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          nohup ./cloudflared tunnel --no-autoupdate --no-tls-verify --url https://localhost:9443 > cf.log 2>&1 &
+          URL=""
+          for i in $(seq 1 30); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cf.log | head -n1 || true)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          [ -n "$URL" ] || { echo "no tunnel url"; tail -n 20 cf.log; exit 1; }
+          echo "::add-mask::$URL"
+          echo "$URL" > /tmp/live_url
+          code=$(curl -sk -o /dev/null -w '%{http_code}' "$URL/" || true)
+          echo "tunnel http $code"
+          curl -s -H "Title: Box live link" -d "$URL" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
+          echo "link sent"
+      - name: Keep alive
+        run: |
+          end=$((SECONDS + 20400))
+          while [ $SECONDS -lt $end ]; do
+            sleep 60
+            docker ps --format '{{.Names}}' | wc -l | sed 's/^/containers: /'
+          done
