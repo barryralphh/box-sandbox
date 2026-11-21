@@ -6,18 +6,35 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
+  actions: write
 jobs:
   box:
     runs-on: ubuntu-latest
     timeout-minutes: 345
     env:
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      STATE_TOKEN: ${{ secrets.BOX_STATE_TOKEN }}
+      STATE_KEY: ${{ secrets.BOX_STATE_KEY }}
+      STATE_REPO: barryralphh/box-state
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install easi.run
         run: |
           curl -fsSLO https://easi.run/install.sh
           bash install.sh > install.log 2>&1 || { tail -n 40 install.log; exit 1; }
           tail -n 15 install.log
+      - name: Restore saved state
+        run: |
+          if [ -z "$STATE_TOKEN" ] || [ -z "$STATE_KEY" ]; then echo "state backup not configured; skipping restore"; exit 0; fi
+          git clone --depth 1 "https://x-access-token:${STATE_TOKEN}@github.com/${STATE_REPO}.git" /tmp/state >/dev/null 2>&1 || { echo "state repo not readable; skipping restore"; exit 0; }
+          [ -f /tmp/state/admin-state.tar.gz.gpg ] || { echo "no backup yet; skipping restore"; exit 0; }
+          cd ~/easi.run
+          VOL=$(docker volume ls --format '{{.Name}}' | grep 'admin-state$' | head -n1 || true)
+          [ -n "$VOL" ] || { echo "admin-state volume not found; skipping restore"; exit 0; }
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$STATE_KEY" -o /tmp/admin-state.tar.gz -d /tmp/state/admin-state.tar.gz.gpg 2>/dev/null || { echo "decrypt failed; skipping restore"; exit 0; }
+          docker compose stop admin || true
+          docker run --rm -v "$VOL":/data -v /tmp:/backup alpine sh -c 'find /data -mindepth 1 -delete && tar xzf /backup/admin-state.tar.gz -C /data --numeric-owner' && echo "state restored" || echo "restore failed"
+          rm -f /tmp/admin-state.tar.gz
       - name: Open private tunnel
         run: |
           curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -50,10 +67,31 @@ jobs:
           [ "$code" = "200" ] || { docker compose logs --no-color --tail 20 admin; exit 1; }
           curl -s -H "Title: Box live link" -d "$URL" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
           echo "link sent"
-      - name: Keep alive
+      - name: Keep alive and back up state
         run: |
-          end=$((SECONDS + 20000))
+          backup() (
+            [ -n "$STATE_TOKEN" ] && [ -n "$STATE_KEY" ] || exit 0
+            cd ~/easi.run
+            VOL=$(docker volume ls --format '{{.Name}}' | grep 'admin-state$' | head -n1 || true)
+            [ -n "$VOL" ] || exit 0
+            docker run --rm -v "$VOL":/data -v /tmp:/backup alpine tar czf /backup/admin-state.tar.gz -C /data --numeric-owner . || { echo "tar failed"; exit 0; }
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$STATE_KEY" --symmetric --cipher-algo AES256 -o /tmp/admin-state.tar.gz.gpg /tmp/admin-state.tar.gz || { echo "encrypt failed"; exit 0; }
+            rm -f /tmp/admin-state.tar.gz
+            size=$(stat -c %s /tmp/admin-state.tar.gz.gpg)
+            if [ "$size" -ge 90000000 ]; then echo "backup too large ($size bytes); skipped"; exit 0; fi
+            rm -rf /tmp/statepush && mkdir /tmp/statepush && cd /tmp/statepush
+            git init -q -b main
+            cp /tmp/admin-state.tar.gz.gpg .
+            git add .
+            git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "state $(date -u +%FT%TZ)"
+            if git push -q --force "https://x-access-token:${STATE_TOKEN}@github.com/${STATE_REPO}.git" main >/dev/null 2>&1; then echo "state backed up ($size bytes)"; else echo "state push failed"; fi
+          )
+          n=0
+          end=$((SECONDS + 19800))
           while [ $SECONDS -lt $end ]; do
             sleep 60
-            docker ps --format '{{.Names}}' | wc -l | sed 's/^/containers: /'
+            n=$((n + 1))
+            if [ $((n % 5)) -eq 0 ]; then backup || true; fi
           done
+          backup || true
+          gh workflow run box.yml --repo "$GITHUB_REPOSITORY" --ref main || echo "could not queue next run; watchdog will start it"
