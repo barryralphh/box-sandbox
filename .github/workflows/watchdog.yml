@@ -1,0 +1,27 @@
+name: watchdog
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions:
+  actions: write
+  contents: read
+jobs:
+  ensure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Start box if none is running
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=0
+          for s in in_progress queued waiting pending requested; do
+            c=$(gh run list -R "$GITHUB_REPOSITORY" --workflow box.yml --status $s --json databaseId --jq 'length')
+            n=$((n + c))
+          done
+          echo "active box runs: $n"
+          if [ "$n" -eq 0 ]; then
+            gh workflow run box.yml -R "$GITHUB_REPOSITORY" --ref main
+            echo "started a new box run"
+          fi
