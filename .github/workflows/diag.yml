@@ -4,21 +4,13 @@ on:
 jobs:
   diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - name: Install
+      - name: Read docs
         run: |
-          curl -fsSLO https://easi.run/install.sh
-          bash install.sh > install.log 2>&1 || { tail -n 40 install.log; exit 1; }
-      - name: Probe admin
-        run: |
-          sleep 10
-          echo "== headers =="
-          curl -ski https://127.0.0.1:9443/ | head -n 15
-          echo "== headers with Host localhost =="
-          curl -ski -H 'Host: localhost:9443' https://127.0.0.1:9443/ | head -n 12
-          echo "== env files =="
-          ls -la ~/easi.run | head -n 40
-          cat ~/easi.run/.env 2>/dev/null | sed -E 's/(PASS|SECRET|TOKEN|KEY)[A-Z_]*=.*/\1=<hidden>/' | head -n 40
-          echo "== config grep =="
-          grep -rnIE 'PUBLIC_(URL|HOST|ORIGIN)|ADMIN_(HOST|ORIGIN|URL|ALLOWED|PUBLIC|DOMAIN|BASE)|ALLOWED_(HOSTS|ORIGINS)|X-Forwarded|reverse proxy|behind a proxy|trust_proxy|TRUSTED_PROXY' ~/easi.run --include='*.md' --include='*.yml' --include='*.yaml' --include='*.example' --include='.env*' --include='*.toml' 2>/dev/null | head -n 50
+          git clone --quiet https://github.com/julianosig/easi.run ~/easi.run
+          cd ~/easi.run
+          echo "== README 236-264 =="; sed -n 236,264p README.md
+          echo "== ADMIN_HOSTNAMES refs =="; grep -rnI 'ADMIN_HOSTNAMES' . --include='*.yaml' --include='*.yml' --include='*.md' --include='*.rs' --include='*.ts' --include='*.sh' --include='.env*' 2>/dev/null | grep -v 'docs/readme' | head -n 30
+          echo "== compose admin block =="; sed -n 18,70p compose.yaml
+          echo "== operations doc =="; ls docs; grep -rnIE 'ADMIN_ORIGIN' docs/*.md | head -n 20
