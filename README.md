@@ -87,7 +87,7 @@ Tool inputs are listed by `GET /api/agent/tools` (each has a JSON schema).
   admin logs in on the admin page with their password. Until then an agent cannot use saved profiles.
 - **The token only creates and drives sessions.** It cannot log into the admin page. The admin password and the
   authenticator code stay with the owner.
-- **MCP:** easi.run also serves an MCP endpoint at `<address>/mcp` with the same Bearer token. It has not been tested here,
+- **MCP works too.** The endpoint is `<address>/mcp` (address from `link.txt`), with the same Bearer token. Tested on 22 Nov 2026: it needs the headers `MCP-Protocol-Version: 2025-06-18` and `Accept: application/json, text/event-stream`. Protocol versions 2025-06-18, 2025-11-25 and 2026-07-28 are supported, an older version such as 2025-03-26 gets a 400. It is stateless (no session id). `tools/list` returns 26 tools: the 20 above plus `start_session`, `stop_session`, `list_sessions`, `list_saved_sessions`, `session_status` and `call_status`. Desktop tools take the session id as `session` and their own arguments under `arguments`. Because the address changes every restart, a client configured once breaks after a restart, so re-read `link.txt` or use `box_client.py` for the REST API.
   and the address changes, so a client configured once will break after a restart.
 - **Be gentle:** automated posting and logins on Instagram or YouTube can get new accounts flagged. Start slow.
 
