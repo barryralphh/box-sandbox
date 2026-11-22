@@ -6,49 +6,36 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
-  actions: write
 jobs:
   box:
     runs-on: ubuntu-latest
     timeout-minutes: 345
     env:
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-      STATE_SSH: ${{ secrets.BOX_STATE_SSH }}
-      STATE_LINK_SSH: ${{ secrets.BOX_LINK_SSH }}
-      STATE_KEY: ${{ secrets.BOX_STATE_KEY }}
-      STATE_REPO: git@github.com:barryralphh/box-state.git
-      GIT_SSH_COMMAND: ssh -i /home/runner/.ssh/box_state -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install easi.run
         run: |
           curl -fsSLO https://easi.run/install.sh
           bash install.sh > install.log 2>&1 || { tail -n 40 install.log; exit 1; }
           tail -n 15 install.log
-      - name: Prepare state key
+      - name: Restore saved logins
+        uses: actions/cache/restore@v4
+        with:
+          path: vault.tgz
+          key: vault-none
+          restore-keys: vault-
+      - name: Load saved logins into the box
         run: |
-          if [ -n "$STATE_SSH" ]; then
-            mkdir -p ~/.ssh
-            printf '%s\n' "$STATE_SSH" > ~/.ssh/box_state
-            chmod 600 ~/.ssh/box_state
-          fi
-          if [ -n "$STATE_LINK_SSH" ]; then
-            mkdir -p ~/.ssh
-            printf '%s\n' "$STATE_LINK_SSH" > ~/.ssh/box_link
-            chmod 600 ~/.ssh/box_link
-          fi
-      - name: Restore saved state
-        run: |
-          if [ -z "$STATE_SSH" ] || [ -z "$STATE_KEY" ]; then echo "state backup not configured; skipping restore"; exit 0; fi
-          git clone --depth 1 "$STATE_REPO" /tmp/state >/dev/null 2>&1 || { echo "state repo not readable; skipping restore"; exit 0; }
-          [ -f /tmp/state/admin-state.tar.gz.gpg ] || { echo "no backup yet; skipping restore"; exit 0; }
           cd ~/easi.run
-          VOL=$(docker volume ls --format '{{.Name}}' | grep 'admin-state$' | head -n1 || true)
-          [ -n "$VOL" ] || { echo "admin-state volume not found; skipping restore"; exit 0; }
-          gpg --batch --yes --pinentry-mode loopback --passphrase "$STATE_KEY" -o /tmp/admin-state.tar.gz -d /tmp/state/admin-state.tar.gz.gpg 2>/dev/null || { echo "decrypt failed; skipping restore"; exit 0; }
-          docker compose stop admin || true
-          docker run --rm -v "$VOL":/data -v /tmp:/backup alpine sh -c 'find /data -mindepth 1 -delete && tar xzf /backup/admin-state.tar.gz -C /data --numeric-owner' && echo "state restored" || echo "restore failed"
-          rm -f /tmp/admin-state.tar.gz
+          VOL=$(docker volume ls -q | grep -E 'admin-state$' | head -n1 || true)
+          echo "state volume: ${VOL:-none}"
+          if [ -f "$GITHUB_WORKSPACE/vault.tgz" ] && [ -n "$VOL" ]; then
+            docker compose stop 2>&1 | tail -n 3
+            docker run --rm -v "$VOL":/v -v "$GITHUB_WORKSPACE":/b alpine:3 sh -c 'cd /v && tar xzf /b/vault.tgz'
+            echo "saved logins restored"
+          else
+            echo "no saved logins yet"
+          fi
       - name: Open private tunnel
         run: |
           curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -71,7 +58,7 @@ jobs:
           touch .env
           if grep -q '^ADMIN_ORIGIN=' .env; then sed -i "s|^ADMIN_ORIGIN=.*|ADMIN_ORIGIN=$URL|" .env; else echo "ADMIN_ORIGIN=$URL" >> .env; fi
           grep -q '^ADMIN_MAX_SESSIONS=' .env || echo "ADMIN_MAX_SESSIONS=3" >> .env
-          docker compose up -d --no-build --pull never --no-deps admin 2>&1 | tail -n 5
+          docker compose up -d --no-build --pull never 2>&1 | tail -n 5
           for i in $(seq 1 40); do
             code=$(curl -sk -o /dev/null -w '%{http_code}' "$URL/" || true)
             echo "tunnel http $code"
@@ -81,46 +68,26 @@ jobs:
           [ "$code" = "200" ] || { docker compose logs --no-color --tail 20 admin; exit 1; }
           curl -s -H "Title: Box live link" -d "$URL" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
           echo "link sent"
-          if [ -n "$STATE_SSH" ]; then
-            ( rm -rf /tmp/linkpush && mkdir /tmp/linkpush && cd /tmp/linkpush && git init -q -b link && echo "$URL" > live_url.txt && git add . && git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "live link $(date -u +%FT%TZ)" && git push -q --force "$STATE_REPO" link >/dev/null 2>&1 && echo "link saved to private repo" ) || echo "link save failed"
-          fi
-          if [ -n "$STATE_LINK_SSH" ]; then
-            rm -rf /tmp/pagespush && mkdir /tmp/pagespush
-            printf '%s\n' "$URL" > /tmp/pagespush/link.txt
-            cat > /tmp/pagespush/index.html <<'HTML'
-          <!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Box</title>
-          <body style="font-family:system-ui;margin:3rem;max-width:34rem"><h1>Opening the box...</h1><p id=m>One moment.</p>
-          <script>
-          fetch('link.txt?t='+Date.now()).then(r=>r.text()).then(u=>{u=u.trim();if(!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(u))throw 0;document.getElementById('m').innerHTML='Redirecting to <a href="'+u+'">'+u+'</a>';location.replace(u)}).catch(()=>{document.getElementById('m').textContent='The box is restarting. Try again in a minute.'})
-          </script>
-          HTML
-            ( cd /tmp/pagespush && git init -q -b main && git add . && git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "link $(date -u +%FT%TZ)" && GIT_SSH_COMMAND="ssh -i /home/runner/.ssh/box_link -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git push -q --force git@github.com:barryralphh/box-link.git main >/dev/null 2>&1 && echo "stable page updated" ) || echo "stable page update failed"
-          fi
-      - name: Keep alive and back up state
+      - name: Keep alive
         run: |
-          backup() (
-            [ -n "$STATE_SSH" ] && [ -n "$STATE_KEY" ] || exit 0
-            cd ~/easi.run
-            VOL=$(docker volume ls --format '{{.Name}}' | grep 'admin-state$' | head -n1 || true)
-            [ -n "$VOL" ] || exit 0
-            docker run --rm -v "$VOL":/data -v /tmp:/backup alpine tar czf /backup/admin-state.tar.gz -C /data --numeric-owner . || { echo "tar failed"; exit 0; }
-            gpg --batch --yes --pinentry-mode loopback --passphrase "$STATE_KEY" --symmetric --cipher-algo AES256 -o /tmp/admin-state.tar.gz.gpg /tmp/admin-state.tar.gz || { echo "encrypt failed"; exit 0; }
-            rm -f /tmp/admin-state.tar.gz
-            size=$(stat -c %s /tmp/admin-state.tar.gz.gpg)
-            if [ "$size" -ge 90000000 ]; then echo "backup too large ($size bytes); skipped"; exit 0; fi
-            rm -rf /tmp/statepush && mkdir /tmp/statepush && cd /tmp/statepush
-            git init -q -b main
-            cp /tmp/admin-state.tar.gz.gpg .
-            git add .
-            git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "state $(date -u +%FT%TZ)"
-            if git push -q --force "$STATE_REPO" main >/dev/null 2>&1; then echo "state backed up ($size bytes)"; else echo "state push failed"; fi
-          )
-          n=0
           end=$((SECONDS + 19800))
           while [ $SECONDS -lt $end ]; do
             sleep 60
-            n=$((n + 1))
-            if [ $((n % 5)) -eq 0 ]; then backup || true; fi
           done
-          backup || true
-          gh workflow run box.yml --repo "$GITHUB_REPOSITORY" --ref main || echo "could not queue next run; watchdog will start it"
+          echo "time to rotate"
+      - name: Pack saved logins
+        if: always()
+        run: |
+          cd ~/easi.run || exit 0
+          VOL=$(docker volume ls -q | grep -E 'admin-state$' | head -n1 || true)
+          [ -n "$VOL" ] || { echo "no state volume"; exit 0; }
+          docker volume ls
+          docker compose stop 2>&1 | tail -n 3
+          docker run --rm -v "$VOL":/v -v "$GITHUB_WORKSPACE":/b alpine:3 sh -c 'tar czf /b/vault.tgz -C /v . && chown '"$(id -u):$(id -g)"' /b/vault.tgz'
+          ls -la "$GITHUB_WORKSPACE/vault.tgz"
+      - name: Save logins for the next run
+        if: always() && hashFiles('vault.tgz') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: vault.tgz
+          key: vault-${{ github.run_id }}
