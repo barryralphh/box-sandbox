@@ -13,9 +13,10 @@ jobs:
     timeout-minutes: 345
     env:
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-      STATE_TOKEN: ${{ secrets.BOX_STATE_TOKEN }}
+      STATE_SSH: ${{ secrets.BOX_STATE_SSH }}
       STATE_KEY: ${{ secrets.BOX_STATE_KEY }}
-      STATE_REPO: barryralphh/box-state
+      STATE_REPO: git@github.com:barryralphh/box-state.git
+      GIT_SSH_COMMAND: ssh -i /home/runner/.ssh/box_state -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install easi.run
@@ -23,10 +24,17 @@ jobs:
           curl -fsSLO https://easi.run/install.sh
           bash install.sh > install.log 2>&1 || { tail -n 40 install.log; exit 1; }
           tail -n 15 install.log
+      - name: Prepare state key
+        run: |
+          if [ -n "$STATE_SSH" ]; then
+            mkdir -p ~/.ssh
+            printf '%s\n' "$STATE_SSH" > ~/.ssh/box_state
+            chmod 600 ~/.ssh/box_state
+          fi
       - name: Restore saved state
         run: |
-          if [ -z "$STATE_TOKEN" ] || [ -z "$STATE_KEY" ]; then echo "state backup not configured; skipping restore"; exit 0; fi
-          git clone --depth 1 "https://x-access-token:${STATE_TOKEN}@github.com/${STATE_REPO}.git" /tmp/state >/dev/null 2>&1 || { echo "state repo not readable; skipping restore"; exit 0; }
+          if [ -z "$STATE_SSH" ] || [ -z "$STATE_KEY" ]; then echo "state backup not configured; skipping restore"; exit 0; fi
+          git clone --depth 1 "$STATE_REPO" /tmp/state >/dev/null 2>&1 || { echo "state repo not readable; skipping restore"; exit 0; }
           [ -f /tmp/state/admin-state.tar.gz.gpg ] || { echo "no backup yet; skipping restore"; exit 0; }
           cd ~/easi.run
           VOL=$(docker volume ls --format '{{.Name}}' | grep 'admin-state$' | head -n1 || true)
@@ -70,7 +78,7 @@ jobs:
       - name: Keep alive and back up state
         run: |
           backup() (
-            [ -n "$STATE_TOKEN" ] && [ -n "$STATE_KEY" ] || exit 0
+            [ -n "$STATE_SSH" ] && [ -n "$STATE_KEY" ] || exit 0
             cd ~/easi.run
             VOL=$(docker volume ls --format '{{.Name}}' | grep 'admin-state$' | head -n1 || true)
             [ -n "$VOL" ] || exit 0
@@ -84,7 +92,7 @@ jobs:
             cp /tmp/admin-state.tar.gz.gpg .
             git add .
             git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "state $(date -u +%FT%TZ)"
-            if git push -q --force "https://x-access-token:${STATE_TOKEN}@github.com/${STATE_REPO}.git" main >/dev/null 2>&1; then echo "state backed up ($size bytes)"; else echo "state push failed"; fi
+            if git push -q --force "$STATE_REPO" main >/dev/null 2>&1; then echo "state backed up ($size bytes)"; else echo "state push failed"; fi
           )
           n=0
           end=$((SECONDS + 19800))
