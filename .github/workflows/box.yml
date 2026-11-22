@@ -14,6 +14,7 @@ jobs:
     env:
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       STATE_SSH: ${{ secrets.BOX_STATE_SSH }}
+      STATE_LINK_SSH: ${{ secrets.BOX_LINK_SSH }}
       STATE_KEY: ${{ secrets.BOX_STATE_KEY }}
       STATE_REPO: git@github.com:barryralphh/box-state.git
       GIT_SSH_COMMAND: ssh -i /home/runner/.ssh/box_state -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
@@ -30,6 +31,11 @@ jobs:
             mkdir -p ~/.ssh
             printf '%s\n' "$STATE_SSH" > ~/.ssh/box_state
             chmod 600 ~/.ssh/box_state
+          fi
+          if [ -n "$STATE_LINK_SSH" ]; then
+            mkdir -p ~/.ssh
+            printf '%s\n' "$STATE_LINK_SSH" > ~/.ssh/box_link
+            chmod 600 ~/.ssh/box_link
           fi
       - name: Restore saved state
         run: |
@@ -77,6 +83,18 @@ jobs:
           echo "link sent"
           if [ -n "$STATE_SSH" ]; then
             ( rm -rf /tmp/linkpush && mkdir /tmp/linkpush && cd /tmp/linkpush && git init -q -b link && echo "$URL" > live_url.txt && git add . && git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "live link $(date -u +%FT%TZ)" && git push -q --force "$STATE_REPO" link >/dev/null 2>&1 && echo "link saved to private repo" ) || echo "link save failed"
+          fi
+          if [ -n "$STATE_LINK_SSH" ]; then
+            rm -rf /tmp/pagespush && mkdir /tmp/pagespush
+            printf '%s\n' "$URL" > /tmp/pagespush/link.txt
+            cat > /tmp/pagespush/index.html <<'HTML'
+          <!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Box</title>
+          <body style="font-family:system-ui;margin:3rem;max-width:34rem"><h1>Opening the box...</h1><p id=m>One moment.</p>
+          <script>
+          fetch('link.txt?t='+Date.now()).then(r=>r.text()).then(u=>{u=u.trim();if(!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(u))throw 0;document.getElementById('m').innerHTML='Redirecting to <a href="'+u+'">'+u+'</a>';location.replace(u)}).catch(()=>{document.getElementById('m').textContent='The box is restarting. Try again in a minute.'})
+          </script>
+          HTML
+            ( cd /tmp/pagespush && git init -q -b main && git add . && git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "link $(date -u +%FT%TZ)" && GIT_SSH_COMMAND="ssh -i /home/runner/.ssh/box_link -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git push -q --force git@github.com:barryralphh/box-link.git main >/dev/null 2>&1 && echo "stable page updated" ) || echo "stable page update failed"
           fi
       - name: Keep alive and back up state
         run: |
