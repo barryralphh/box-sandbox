@@ -75,6 +75,9 @@ jobs:
           [ "$code" = "200" ] || { docker compose logs --no-color --tail 20 admin; exit 1; }
           curl -s -H "Title: Box live link" -d "$URL" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
           echo "link sent"
+          if [ -n "$STATE_SSH" ]; then
+            ( rm -rf /tmp/linkpush && mkdir /tmp/linkpush && cd /tmp/linkpush && git init -q -b link && echo "$URL" > live_url.txt && git add . && git -c user.name=box -c user.email=box@users.noreply.github.com commit -q -m "live link $(date -u +%FT%TZ)" && git push -q --force "$STATE_REPO" link >/dev/null 2>&1 && echo "link saved to private repo" ) || echo "link save failed"
+          fi
       - name: Keep alive and back up state
         run: |
           backup() (
