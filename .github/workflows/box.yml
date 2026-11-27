@@ -53,14 +53,21 @@ jobs:
         run: |
           curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
-          nohup ./cloudflared tunnel --no-autoupdate --no-tls-verify --url https://localhost:9443 > cf.log 2>&1 &
           URL=""
-          for i in $(seq 1 30); do
-            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cf.log | head -n1 || true)
+          for attempt in $(seq 1 8); do
+            pkill -x cloudflared || true
+            : > cf.log
+            nohup ./cloudflared tunnel --no-autoupdate --no-tls-verify --url https://localhost:9443 > cf.log 2>&1 &
+            for i in $(seq 1 15); do
+              URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cf.log | grep -v '^https://api\.' | head -n1 || true)
+              [ -n "$URL" ] && break
+              sleep 2
+            done
             [ -n "$URL" ] && break
-            sleep 2
+            echo "tunnel attempt $attempt failed: $(grep -m1 -E 'failed|429|error' cf.log | cut -c1-140)"
+            sleep $((attempt * 20))
           done
-          [ -n "$URL" ] || { echo "no tunnel url"; tail -n 20 cf.log; exit 1; }
+          [ -n "$URL" ] || { echo "no tunnel url after retries"; tail -n 20 cf.log; exit 1; }
           echo "::add-mask::$URL"
           echo "$URL" > /tmp/live_url
       - name: Point the admin at the tunnel address
@@ -124,3 +131,10 @@ jobs:
           done
           backup || true
           gh workflow run box.yml --repo "$GITHUB_REPOSITORY" --ref main || echo "could not queue next run; watchdog will start it"
+      - name: Queue next run after a failed start
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 120
+          gh workflow run box.yml -R "$GITHUB_REPOSITORY" --ref main
